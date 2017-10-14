@@ -12,7 +12,7 @@ adam_lr = 0.0002
 adam_beta_1 = 0.5
 
 
-def train(batch_size=BATCH_SIZE, prog=True):
+def train(prog=True):
 
     # Load MNIST
     x_train, y_train, x_test, y_test = load_mnist()
@@ -20,15 +20,15 @@ def train(batch_size=BATCH_SIZE, prog=True):
     # Build model
     d = acgan_mnist_model_d()
     g = acgan_mnist_model_g()
-    combined = generator_containing_discriminator(g, d)
 
     # Set up optimizers
     adam = Adam(lr=adam_lr, beta_1=adam_beta_1)
 
     # Set loss function and compile models
+    g.compile(optimizer=adam, loss='binary_crossentropy')
     d.compile(optimizer=adam, loss=[
               'binary_crossentropy', 'sparse_categorical_crossentropy'])
-    g.compile(optimizer=adam, loss='binary_crossentropy')
+    combined = combine_acgan(g, d)
     combined.compile(optimizer=adam, loss=[
                      'binary_crossentropy', 'sparse_categorical_crossentropy'])
 
@@ -38,95 +38,72 @@ def train(batch_size=BATCH_SIZE, prog=True):
     n_batch = int(x_train.shape[0] / BATCH_SIZE)
     for epoch in range(N_EPOCH):
         print('Epoch {} of {}'.format(epoch + 1, N_EPOCH))
-
         progress_bar = Progbar(target=n_batch)
 
-        epoch_gen_loss = []
-        epoch_disc_loss = []
+        epoch_g_loss = []
+        epoch_d_loss = []
 
         for index in range(n_batch):
-            progress_bar.update(index)
-            # generate a new batch of noise
-            noise = np.random.uniform(-1, 1, (batch_size, LATENT_SIZE))
+            progress_bar.update(index, force=True)
 
-            # get a batch of real images
-            image_batch = x_train[index * batch_size:(index + 1) * batch_size]
-            label_batch = y_train[index * batch_size:(index + 1) * batch_size]
+            # ---------------- Train discriminator --------------------------- #
+            # Generate samples from g
+            z = np.random.uniform(-1, 1, (BATCH_SIZE, LATENT_SIZE))
+            # Sample some labels from p_c
+            y_sampled = np.random.randint(0, 10, BATCH_SIZE)
+            x_g = g.predict([z, y_sampled.reshape((-1, 1))], verbose=0)
 
-            # sample some labels from p_c
-            sampled_labels = np.random.randint(0, 10, batch_size)
+            # Combine with real samples
+            x_real = x_train[index * BATCH_SIZE:(index + 1) * BATCH_SIZE]
+            x_d = np.concatenate((x_real, x_g))
+            y_d = np.array([1] * BATCH_SIZE + [0] * BATCH_SIZE)
+            # Conditional (auxilary) labels
+            y_real = y_train[index * BATCH_SIZE:(index + 1) * BATCH_SIZE]
+            y_aux = np.concatenate((y_real, y_sampled), axis=0)
 
-            # generate a batch of fake images, using the generated labels as a
-            # conditioner. We reshape the sampled labels to be
-            # (batch_size, 1) so that we can feed them into the embedding
-            # layer as a length one sequence
-            generated_images = g.predict(
-                [noise, sampled_labels.reshape((-1, 1))], verbose=0)
+            epoch_d_loss.append(d.train_on_batch(x_d, [y_d, y_aux]))
 
-            X = np.concatenate((image_batch, generated_images))
-            y = np.array([1] * batch_size + [0] * batch_size)
-            aux_y = np.concatenate((label_batch, sampled_labels), axis=0)
+            # ---------------- Train generator ------------------------------- #
+            # Generate 2 * BATCH_SIZE samples to match d's batch size
+            z = np.random.uniform(-1, 1, (2 * BATCH_SIZE, LATENT_SIZE))
+            y_sampled = np.random.randint(0, 10, 2 * BATCH_SIZE)
+            y_g = np.ones(2 * BATCH_SIZE)
 
-            # see if the discriminator can figure itself out...
-            epoch_disc_loss.append(d.train_on_batch(X, [y, aux_y]))
-
-            # make new noise. we generate 2 * batch size here such that we have
-            # the generator optimize over an identical number of images as the
-            # discriminator
-            noise = np.random.uniform(-1, 1, (2 * batch_size, latent_size))
-            sampled_labels = np.random.randint(0, 10, 2 * batch_size)
-
-            # we want to train the genrator to trick the discriminator
-            # For the generator, we want all the {fake, not-fake} labels to say
-            # not-fake
-            trick = np.ones(2 * batch_size)
-
-            epoch_gen_loss.append(combined.train_on_batch(
-                [noise, sampled_labels.reshape((-1, 1))], [trick, sampled_labels]))
+            epoch_g_loss.append(combined.train_on_batch(
+                [z, y_sampled.reshape((-1, 1))], [y_d, y_sampled]))
 
         print('\nTesting for epoch {}:'.format(epoch + 1))
+        n_test = x_test.shape[0]
 
-        # evaluate the testing loss here
+        # ---------------- Test discriminator -------------------------------- #
+        z = np.random.uniform(-1, 1, (n_test, LATENT_SIZE))
+        y_sampled = np.random.randint(0, 10, n_test)
+        x_g = g.predict([z, y_sampled.reshape((-1, 1))], verbose=0)
 
-        # generate a new batch of noise
-        noise = np.random.uniform(-1, 1, (nb_test, latent_size))
+        x_d = np.concatenate((x_test, x_g))
+        y_d = np.array([1] * n_test + [0] * n_test)
+        y_aux = np.concatenate((y_test, y_sampled), axis=0)
 
-        # sample some labels from p_c and generate images from them
-        sampled_labels = np.random.randint(0, 10, nb_test)
-        generated_images = generator.predict(
-            [noise, sampled_labels.reshape((-1, 1))], verbose=False)
+        d_test_loss = d.evaluate(x_d, [y_d, y_aux], verbose=0)
+        d_train_loss = np.mean(np.array(epoch_d_loss), axis=0)
 
-        X = np.concatenate((X_test, generated_images))
-        y = np.array([1] * nb_test + [0] * nb_test)
-        aux_y = np.concatenate((y_test, sampled_labels), axis=0)
+        # ---------------- Test generator ------------------------------------ #
+        z = np.random.uniform(-1, 1, (2 * n_test, LATENT_SIZE))
+        y_sampled = np.random.randint(0, 10, 2 * n_test)
+        y_g = np.ones(2 * n_test)
 
-        # see if the discriminator can figure itself out...
-        discriminator_test_loss = discriminator.evaluate(
-            X, [y, aux_y], verbose=False)
-
-        discriminator_train_loss = np.mean(np.array(epoch_disc_loss), axis=0)
-
-        # make new noise
-        noise = np.random.uniform(-1, 1, (2 * nb_test, latent_size))
-        sampled_labels = np.random.randint(0, 10, 2 * nb_test)
-
-        trick = np.ones(2 * nb_test)
-
-        generator_test_loss = combined.evaluate(
-            [noise, sampled_labels.reshape((-1, 1))],
-            [trick, sampled_labels], verbose=False)
-
-        generator_train_loss = np.mean(np.array(epoch_gen_loss), axis=0)
+        g_test_loss = combined.evaluate(
+            [z, y_sampled.reshape((-1, 1))], [y_g, y_sampled], verbose=0)
+        g_train_loss = np.mean(np.array(epoch_g_loss), axis=0)
 
         # generate an epoch report on performance
-        train_history['generator'].append(generator_train_loss)
-        train_history['discriminator'].append(discriminator_train_loss)
-
-        test_history['generator'].append(generator_test_loss)
-        test_history['discriminator'].append(discriminator_test_loss)
+        train_history['generator'].append(g_train_loss)
+        train_history['discriminator'].append(d_train_loss)
+        test_history['generator'].append(g_test_loss)
+        test_history['discriminator'].append(d_test_loss)
 
         print('{0:<22s} | {1:4s} | {2:15s} | {3:5s}'.format(
-            'component', *discriminator.metrics_names))
+            'component', *d.metrics_names))
         print('-' * 65)
 
         ROW_FMT = '{0:<22s} | {1:<4.2f} | {2:<15.2f} | {3:<5.2f}'
@@ -139,21 +116,21 @@ def train(batch_size=BATCH_SIZE, prog=True):
         print(ROW_FMT.format('discriminator (test)',
                              *test_history['discriminator'][-1]))
 
-        # save weights every epoch
-        generator.save_weights(
-            'params_generator_epoch_{0:03d}.hdf5'.format(epoch), True)
-        discriminator.save_weights(
-            'params_discriminator_epoch_{0:03d}.hdf5'.format(epoch), True)
+        # Aave weights every epoch
+        g.save_weights("{}weight_g_epoch_{:03d}.hdf5".format(
+            WEIGHT_DIR, epoch), True)
+        d.save_weights("{}weight_d_epoch_{:03d}.hdf5".format(
+            WEIGHT_DIR, epoch), True)
 
         # generate some digits to display
-        noise = np.random.uniform(-1, 1, (100, latent_size))
+        noise = np.random.uniform(-1, 1, (100, LATENT_SIZE))
 
         sampled_labels = np.array([
             [i] * 10 for i in range(10)
         ]).reshape(-1, 1)
 
         # get a batch to display
-        generated_images = generator.predict(
+        generated_images = g.predict(
             [noise, sampled_labels], verbose=0)
 
         # arrange them into a grid
@@ -207,9 +184,10 @@ def generate(nice=False):
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str)
-    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--nice", dest="nice", action="store_true")
+    parser.add_argument("--no-prog", dest="prog", action="store_false")
     parser.set_defaults(nice=False)
+    parser.set_defaults(prog=True)
     args = parser.parse_args()
     return args
 
@@ -217,6 +195,6 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     if args.mode == "train":
-        train(batch_size=args.batch_size)
+        train(prog=args.prog)
     elif args.mode == "generate":
-        generate(batch_size=args.batch_size, nice=args.nice)
+        generate(nice=args.nice)
