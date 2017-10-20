@@ -16,5 +16,5 @@ SCALE = 127.5       # Scaling factor
 LATENT_SIZE = 100
 BATCH_SIZE = 128
 N_EPOCH = 50
-IMG_DIR = "./vis/"
+VIS_DIR = "./vis/"
 WEIGHT_DIR = "./weights/"

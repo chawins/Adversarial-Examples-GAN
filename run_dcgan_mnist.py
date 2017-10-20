@@ -58,7 +58,7 @@ def train(prog=True):
                     image = combine_images(x_g)
                     image = image * SCALE + SCALE
                     Image.fromarray(image.astype(np.uint8)).save(
-                        IMG_DIR + str(epoch) + "_" + str(index) + ".png")
+                        VIS_DIR + str(epoch) + "_" + str(index) + ".png")
                     # Print losses
                     print("batch %d d_loss : %f" % (index, d_loss))
                     print("batch %d g_loss : %f" % (index, g_loss))
@@ -97,7 +97,7 @@ def generate(nice=False):
 
     image = image * SCALE + SCALE
     Image.fromarray(image.astype(np.uint8)).save(
-        IMG_DIR + "generated_image.png")
+        VIS_DIR + "generated_image.png")
 
 
 def get_args():
