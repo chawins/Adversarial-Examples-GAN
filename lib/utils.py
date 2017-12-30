@@ -23,6 +23,7 @@ def load_mnist():
     # Load dataset and roughly rescale to [-1, 1]
     (x_train, y_train), (x_test, y_test) = mnist.load_data()
     x_train = (x_train.astype(np.float32) - SCALE) / SCALE
+    x_test = (x_test.astype(np.float32) - SCALE) / SCALE
     # Add channel axis
     x_train = x_train[:, :, :, np.newaxis]
     x_test = x_test[:, :, :, np.newaxis]

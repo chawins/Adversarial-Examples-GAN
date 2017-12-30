@@ -4,6 +4,7 @@ import pickle
 from collections import defaultdict
 
 import numpy as np
+import keras
 from keras.datasets import mnist
 from keras.optimizers import SGD
 from keras.utils.generic_utils import Progbar

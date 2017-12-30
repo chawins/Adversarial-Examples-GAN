@@ -28,7 +28,7 @@ def dcgan_mnist_model_g():
     return model
 
 
-def acgan_mnist_model_g():
+def acgan_mnist_model_g_old():
 
     latent = Input(shape=(LATENT_SIZE, ))
     image_class = Input(shape=(1, ), dtype='int32')
@@ -61,6 +61,37 @@ def acgan_mnist_model_g():
     fake_image = model(mul)
 
     return Model(inputs=[latent, image_class], outputs=fake_image)
+
+
+def acgan_mnist_model_g():
+
+    latent = Input(shape=(LATENT_SIZE, ))
+    image_class = Input(shape=(1, ), dtype='int32')
+    embed = Embedding(
+        10, LATENT_SIZE, embeddings_initializer='glorot_normal')(image_class)
+    flatten = Flatten()(embed)
+    # hadamard product between z-space and a class conditional embedding
+    mul = Multiply()([latent, flatten])
+
+    model = Dense(1024, input_dim=LATENT_SIZE, activation='relu')(mul)
+    model = Dense(128 * 7 * 7, activation='relu')(model)
+    model = Reshape((7, 7, 128))(model)
+
+    # upsample to (..., 14, 14)
+    model = UpSampling2D(size=(2, 2))(model)
+    model = Conv2D(256, (5, 5), padding='same', activation='relu',
+                   kernel_initializer='glorot_normal')(model)
+
+    # upsample to (..., 28, 28)
+    model = UpSampling2D(size=(2, 2))(model)
+    model = Conv2D(128, (5, 5), padding='same', activation='relu',
+                   kernel_initializer='glorot_normal')(model)
+
+    # take a channel axis reduction
+    model = Conv2D(1, (2, 2), padding='same', activation='tanh',
+                   kernel_initializer='glorot_normal')(model)
+
+    return Model(inputs=[latent, image_class], outputs=model)
 
 
 def advgan1_mnist_model_g():
@@ -189,6 +220,39 @@ def advgan1_mnist_model_d():
     return Model(inputs=image, outputs=pred)
 
 
+def advgan2_mnist_model_d():
+
+    image = Input(shape=(28, 28, 1))
+
+    model = Conv2D(32, (3, 3), strides=(2, 2), padding='same',
+                   input_shape=(28, 28, 1))(image)
+    model = LeakyReLU()(model)
+    model = Dropout(0.3)(model)
+
+    model = Conv2D(64, (3, 3), strides=(1, 1), padding='same')(model)
+    model = LeakyReLU()(model)
+    model = Dropout(0.3)(model)
+
+    model = Conv2D(128, (3, 3), strides=(2, 2), padding='same')(model)
+    model = LeakyReLU()(model)
+    model = Dropout(0.3)(model)
+
+    model = Conv2D(256, (3, 3), strides=(1, 1), padding='same')(model)
+    model = LeakyReLU()(model)
+    model = Dropout(0.3)(model)
+
+    model = Flatten()(model)
+
+    # first output (name=generation) is whether or not the discriminator
+    # thinks the image that is being shown is fake, and the second output
+    # (name=auxiliary) is the class that the discriminator thinks the image
+    # belongs to.
+    fake = Dense(1, activation='sigmoid', name='generation')(model)
+    pred = Dense(10, activation='softmax', name='classification')(model)
+
+    return Model(inputs=image, outputs=[fake, pred])
+
+
 # ------------------------------- Model Utils -------------------------------- #
 
 
@@ -210,8 +274,8 @@ def combine_acgan(g, d):
 
     # we only want to be able to train generation for the combined model
     d.trainable = False
-    fake, aux = d(fake)
-    return Model(inputs=[latent, image_class], outputs=[fake, aux])
+    dis, aux = d(fake)
+    return Model(inputs=[latent, image_class], outputs=[dis, aux])
 
 
 def combine_advgan1(g, d):

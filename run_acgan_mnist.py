@@ -5,7 +5,7 @@ from param import *
 
 # Set CUDA visible device to GPU:0
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2, 3"
 
 # Adam parameters suggested in https://arxiv.org/abs/1511.06434
 adam_lr = 0.0002
@@ -30,10 +30,10 @@ def train(prog=True):
     # Set loss function and compile models
     g.compile(optimizer=adam, loss='binary_crossentropy')
     d.compile(optimizer=adam, loss=[
-              'binary_crossentropy', 'sparse_categorical_crossentropy'])
+        'binary_crossentropy', 'sparse_categorical_crossentropy'])
     combined = combine_acgan(g, d)
     combined.compile(optimizer=adam, loss=[
-                     'binary_crossentropy', 'sparse_categorical_crossentropy'])
+        'binary_crossentropy', 'sparse_categorical_crossentropy'])
 
     train_history = defaultdict(list)
     test_history = defaultdict(list)
@@ -73,7 +73,7 @@ def train(prog=True):
             y_g = np.ones(2 * BATCH_SIZE)
 
             epoch_g_loss.append(combined.train_on_batch(
-                [z, y_sampled.reshape((-1, 1))], [y_d, y_sampled]))
+                [z, y_sampled.reshape((-1, 1))], [y_g, y_sampled]))
 
         print('\nTesting for epoch {}:'.format(epoch + 1))
         n_test = x_test.shape[0]
@@ -139,7 +139,7 @@ def train(prog=True):
         # arrange them into a grid
         img = (np.concatenate([r.reshape(-1, 28)
                                for r in np.split(generated_images, 10)
-                               ], axis=-1) * 127.5 + 127.5).astype(np.uint8)
+                               ], axis=-1) * SCALE + SCALE).astype(np.uint8)
 
         Image.fromarray(img).save(
             '{}plot_epoch_{:03d}_generated.png'.format(VIS_DIR, epoch))
@@ -148,48 +148,9 @@ def train(prog=True):
                 open('acgan-history.pkl', 'wb'))
 
 
-def generate(nice=False):
-
-    g = acgan_mnist_model_g()
-    g.compile(loss='binary_crossentropy', optimizer="SGD")
-    g.load_weights('generator')
-
-    if nice:
-
-        d = acgan_mnist_model_d()
-        d.compile(loss='binary_crossentropy', optimizer="SGD")
-        d.load_weights('discriminator')
-
-        noise = np.random.uniform(-1, 1, (BATCH_SIZE * 20, 100))
-        generated_images = g.predict(noise, verbose=1)
-        d_pret = d.predict(generated_images, verbose=1)
-        index = np.arange(0, BATCH_SIZE * 20)
-        index.resize((BATCH_SIZE * 20, 1))
-        pre_with_index = list(np.append(d_pret, index, axis=1))
-        pre_with_index.sort(key=lambda x: x[0], reverse=True)
-        nice_images = np.zeros(
-            (BATCH_SIZE,) + generated_images.shape[1:3], dtype=np.float32)
-        nice_images = nice_images[:, :, :, None]
-        for i in range(BATCH_SIZE):
-            idx = int(pre_with_index[i][1])
-            nice_images[i, :, :, 0] = generated_images[idx, :, :, 0]
-        image = combine_images(nice_images)
-    else:
-        noise = np.random.uniform(-1, 1, (BATCH_SIZE, 100))
-        generated_images = g.predict(noise, verbose=1)
-        image = combine_images(generated_images)
-
-    image = image * SCALE + SCALE
-    Image.fromarray(image.astype(np.uint8)).save(
-        VIS_DIR + "generated_image.png")
-
-
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str)
-    parser.add_argument("--nice", dest="nice", action="store_true")
     parser.add_argument("--no-prog", dest="prog", action="store_false")
-    parser.set_defaults(nice=False)
     parser.set_defaults(prog=True)
     args = parser.parse_args()
     return args
@@ -197,7 +158,4 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    if args.mode == "train":
-        train(prog=args.prog)
-    elif args.mode == "generate":
-        generate(nice=args.nice)
+    train(prog=args.prog)

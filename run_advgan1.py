@@ -10,6 +10,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 # Adam parameters suggested in https://arxiv.org/abs/1511.06434
 adam_lr = 0.0002
 adam_beta_1 = 0.5
+# Number of batches to train discriminator before training generator for 1 batch
+k = 1
 
 
 def random_sample(size):
@@ -31,10 +33,105 @@ def generate_random(g, size):
     return x_g, y_sampled, y_t
 
 
+def collage(images):
+    img = (np.concatenate([np.concatenate([s for s in r], axis=1)
+                           for r in np.split(images, 10)], axis=0) *
+           127.5 + 127.5).astype(np.uint8)
+    return np.squeeze(img)
+
+
+def print_progress(g, d, train_history, test_history, losses, data, epoch):
+
+    # generate an epoch report on performance
+    train_history['generator'].append(losses['g_train_loss'])
+    train_history['discriminator'].append(losses['d_train_loss'])
+    test_history['generator'].append(losses['g_test_loss'])
+    test_history['discriminator'].append(losses['d_test_loss'])
+
+    print('{0:<22s} | {1:4s}'.format(
+        'component', *d.metrics_names))
+    print('-' * 65)
+
+    ROW_FMT = '{0:<22s} | {1:<4.4f}'
+    print(ROW_FMT.format('generator (train)',
+                         train_history['generator'][-1]))
+    print(ROW_FMT.format('generator (test)',
+                         test_history['generator'][-1]))
+    print(ROW_FMT.format('discriminator (train)',
+                         train_history['discriminator'][-1]))
+    print(ROW_FMT.format('discriminator (test)',
+                         test_history['discriminator'][-1]))
+
+    # Save weights every epoch
+    g.save_weights("{}weight_g_epoch_{:03d}.hdf5".format(
+        WEIGHT_DIR, epoch), True)
+    d.save_weights("{}weight_d_epoch_{:03d}.hdf5".format(
+        WEIGHT_DIR, epoch), True)
+
+    # generate some digits to display
+    noise = np.random.uniform(-1, 1, (100, LATENT_SIZE))
+
+    sampled_labels = np.array([[i] * 10 for i in range(10)]).reshape(-1, 1)
+    sampled_target = np.array([[i for i in range(10)] * 10]).reshape(-1, 1)
+
+    # get a batch to display
+    generated_images = g.predict(
+        [noise, sampled_labels, sampled_target], verbose=0)
+
+    # Get classification on generated images
+    y_pred = []
+    for i, x in enumerate(generated_images):
+        tmp = d.predict(x.reshape(1, 28, 28, 1))
+        y_pred.append(np.argmax(tmp[0]))
+        if (i + 1) % 10 == 0:
+            print(y_pred)
+            y_pred = []
+
+    # Get classification on real images
+    _, _, x_test, y_test = data
+    y_pred = np.argmax(d.predict(x_test), axis=1)
+    n_correct = np.sum(y_pred == y_test)
+    print("Accuracy: " + str(float(n_correct) / len(x_test)))
+
+    # Arrange them into a grid
+    Image.fromarray(collage(generated_images)).save(
+        '{}plot_epoch_{:03d}_generated.png'.format(VIS_DIR, epoch))
+
+    return train_history, test_history
+
+
+def print_progress_index(g, d, epoch, index):
+
+     # generate some digits to display
+    noise = np.random.uniform(-1, 1, (100, LATENT_SIZE))
+
+    sampled_labels = np.array([[i] * 10 for i in range(10)]).reshape(-1, 1)
+    sampled_target = np.array([[i for i in range(10)] * 10]).reshape(-1, 1)
+
+    # get a batch to display
+    generated_images = g.predict(
+        [noise, sampled_labels, sampled_target], verbose=0)
+
+    # Get classification on generated images
+    y_pred = []
+    for i, x in enumerate(generated_images):
+        tmp = d.predict(x.reshape(1, 28, 28, 1))
+        y_pred.append(np.argmax(tmp[0]))
+        if (i + 1) % 10 == 0:
+            print(y_pred)
+            y_pred = []
+
+    # Arrange them into a grid
+    Image.fromarray(collage(generated_images)).save(
+        '{}plot_epoch_{:03d}_index_{:03d}_generated.png'.format(VIS_DIR, epoch,
+                                                                index))
+
+
 def train(prog=True):
 
     # Load MNIST
-    x_train, y_train, x_test, y_test = load_mnist()
+    data = load_mnist()
+    x_train, y_train, x_test, y_test = data
 
     # Build model
     d = advgan1_mnist_model_d()
@@ -64,16 +161,22 @@ def train(prog=True):
             progress_bar.update(index, force=True)
 
             # ---------------- Train discriminator --------------------------- #
-            x_g, y_sampled, y_t = generate_random(g, BATCH_SIZE)
+            for _ in range(k):
+                x_g, y_sampled, y_t = generate_random(g, BATCH_SIZE)
 
-            # Combine with real samples
-            x_real = x_train[index * BATCH_SIZE:(index + 1) * BATCH_SIZE]
-            x_d = np.concatenate((x_real, x_g))
-            # Conditional labels
-            y_real = y_train[index * BATCH_SIZE:(index + 1) * BATCH_SIZE]
-            y_d = np.concatenate((y_real, y_sampled), axis=0)
+                # Combine with real samples
+                ind = np.random.randint(0, len(x_train), BATCH_SIZE)
+                # ind = np.linspace(index * BATCH_SIZE, (index + 1)
+                #                   * BATCH_SIZE - 1, BATCH_SIZE)
+                x_real = x_train[ind]
+                x_d = np.concatenate((x_real, x_g))
+                # Conditional labels
+                y_real = y_train[ind]
+                y_d = np.concatenate((y_real, y_sampled), axis=0)
 
-            epoch_d_loss.append(d.train_on_batch(x_d, y_d))
+                d_loss = d.train_on_batch(x_d, y_d)
+
+            epoch_d_loss.append(d_loss)
 
             # ---------------- Train generator ------------------------------- #
             # Generate 2 * BATCH_SIZE samples to match d's batch size
@@ -81,6 +184,10 @@ def train(prog=True):
 
             epoch_g_loss.append(combined.train_on_batch(
                 [z, y_sampled.reshape((-1, 1)), y_t.reshape((-1, 1))], y_t))
+
+            # if (index + 1) % 20 == 0:
+            #     # Print progress and samples
+            #     print_progress_index(g, d, epoch, index)
 
         print('\nTesting for epoch {}:'.format(epoch + 1))
         n_test = x_test.shape[0]
@@ -97,106 +204,35 @@ def train(prog=True):
         # ---------------- Test generator ------------------------------------ #
         z, y_sampled, y_t = random_sample(2 * n_test)
 
-        g_test_loss = combined.evaluate(
-            [z, y_sampled.reshape((-1, 1)), y_t.reshape((-1, 1))], y_t, verbose=0)
+        g_test_loss = combined.evaluate([z, y_sampled.reshape((-1, 1)),
+                                         y_t.reshape((-1, 1))], y_t, verbose=0)
         g_train_loss = np.mean(np.array(epoch_g_loss), axis=0)
 
-        # generate an epoch report on performance
-        train_history['generator'].append(g_train_loss)
-        train_history['discriminator'].append(d_train_loss)
-        test_history['generator'].append(g_test_loss)
-        test_history['discriminator'].append(d_test_loss)
-
-        print('{0:<22s} | {1:4s}'.format(
-            'component', *d.metrics_names))
-        print('-' * 65)
-
-        ROW_FMT = '{0:<22s} | {1:<4.4f}'
-        print(ROW_FMT.format('generator (train)',
-                             train_history['generator'][-1]))
-        print(ROW_FMT.format('generator (test)',
-                             test_history['generator'][-1]))
-        print(ROW_FMT.format('discriminator (train)',
-                             train_history['discriminator'][-1]))
-        print(ROW_FMT.format('discriminator (test)',
-                             test_history['discriminator'][-1]))
-
-        # Aave weights every epoch
-        g.save_weights("{}weight_g_epoch_{:03d}.hdf5".format(
-            WEIGHT_DIR, epoch), True)
-        d.save_weights("{}weight_d_epoch_{:03d}.hdf5".format(
-            WEIGHT_DIR, epoch), True)
-
-        # generate some digits to display
-        noise = np.random.uniform(-1, 1, (100, LATENT_SIZE))
-
-        sampled_labels = np.array([[i] * 10 for i in range(10)]).reshape(-1, 1)
-        sampled_target = np.array([[i for i in range(10)] * 10]).reshape(-1, 1)
-
-        # get a batch to display
-        generated_images = g.predict(
-            [noise, sampled_labels, sampled_target], verbose=0)
-
-        # Get classification on generated images
-        y_pred = []
-        for i, x in enumerate(generated_images):
-            tmp = d.predict(x.reshape(1, 28, 28, 1))
-            y_pred.append(np.argmax(tmp[0]))
-            if (i + 1) % 10 == 0:
-                print(y_pred)
-                y_pred = []
-
-        # Get classification on real images
-        y_pred = np.argmax(d.predict(x_test), axis=1)
-        n_correct = np.sum(y_pred == y_test)
-        print("Accuracy: " + str(float(n_correct) / n_test))
-
-        # arrange them into a grid
-        img = (np.concatenate([r.reshape(-1, 28)
-                               for r in np.split(generated_images, 10)
-                               ], axis=-1) * 127.5 + 127.5).astype(np.uint8)
-
-        Image.fromarray(img).save(
-            '{}plot_epoch_{:03d}_generated.png'.format(VIS_DIR, epoch))
+        losses = {"g_train_loss": g_train_loss, "d_train_loss": d_train_loss,
+                  "g_test_loss": g_test_loss, "d_test_loss": d_test_loss}
+        # Print progress, evaluate every epoch
+        print_progress(g, d, train_history, test_history, losses, data, epoch)
 
     pickle.dump({'train': train_history, 'test': test_history},
-                open('acgan-history.pkl', 'wb'))
+                open('advgan1-history.pkl', 'wb'))
 
 
-def generate(nice=False):
+def generate(size=1, weight_path=None, **kwargs):
 
-    g = acgan_mnist_model_g()
-    g.compile(loss='binary_crossentropy', optimizer="SGD")
-    g.load_weights('generator')
+    y_sampled = kwargs.get("y_sampled")
+    y_t = kwargs.get("y_t")
 
-    if nice:
+    g = advgan1_mnist_model_g()
+    g.compile(optimizer="SGD", loss='sparse_categorical_crossentropy')
 
-        d = acgan_mnist_model_d()
-        d.compile(loss='binary_crossentropy', optimizer="SGD")
-        d.load_weights('discriminator')
+    if weight_path is None:
+        weight_path = WEIGHT_DIR + "weights_best.h5"
+    g.load_weights(weight_path)
 
-        noise = np.random.uniform(-1, 1, (BATCH_SIZE * 20, 100))
-        generated_images = g.predict(noise, verbose=1)
-        d_pret = d.predict(generated_images, verbose=1)
-        index = np.arange(0, BATCH_SIZE * 20)
-        index.resize((BATCH_SIZE * 20, 1))
-        pre_with_index = list(np.append(d_pret, index, axis=1))
-        pre_with_index.sort(key=lambda x: x[0], reverse=True)
-        nice_images = np.zeros(
-            (BATCH_SIZE,) + generated_images.shape[1:3], dtype=np.float32)
-        nice_images = nice_images[:, :, :, None]
-        for i in range(BATCH_SIZE):
-            idx = int(pre_with_index[i][1])
-            nice_images[i, :, :, 0] = generated_images[idx, :, :, 0]
-        image = combine_images(nice_images)
-    else:
-        noise = np.random.uniform(-1, 1, (BATCH_SIZE, 100))
-        generated_images = g.predict(noise, verbose=1)
-        image = combine_images(generated_images)
-
-    image = image * SCALE + SCALE
-    Image.fromarray(image.astype(np.uint8)).save(
-        VIS_DIR + "generated_image.png")
+    z = np.random.uniform(-1, 1, (size, LATENT_SIZE))
+    x_g = g.predict([z, y_sampled.reshape((-1, 1)),
+                     y_t.reshape((-1, 1))], verbose=0)
+    return x_g
 
 
 def get_args():
